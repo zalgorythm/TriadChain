@@ -1,4 +1,8 @@
-// consensus.rs
+// consensus/mod.rs
+
+pub mod bft; // Declare the bft submodule
+#[cfg(test)]
+mod bft_test; // Added test module for bft structs
 
 /// Represents a validator in the system.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added common derives

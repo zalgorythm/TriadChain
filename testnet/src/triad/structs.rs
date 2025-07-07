@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH}; // Added for timestamp
 // Removed direct blake3 import as it's now encapsulated in crypto::hash
 use crate::crypto::hash::blake3_hash; // Import the centralized blake3_hash
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)] // Added PartialEq, Eq
 pub struct TriadHeader {
     pub level: u64,
     pub position: String,
