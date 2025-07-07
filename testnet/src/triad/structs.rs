@@ -36,6 +36,18 @@ impl TriadHeader {
 }
 
 #[derive(Debug, Clone)]
+pub struct Transaction {
+    pub version: u8,
+    pub nonce: u64,
+    pub sender: [u8; 32],    // Public key hash
+    pub recipient: [u8; 32], // Public key hash
+    pub amount: u64,
+    pub gas_limit: u64,
+    pub signature: [u8; 64], // Ed25519 signature
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TriadState {
     pub storage: BTreeMap<[u8; 32], Vec<u8>>,
     pub root: [u8; 32],
@@ -65,7 +77,8 @@ impl TriadState {
 
 #[derive(Debug)]
 pub struct Triad {
-    pub header: TriadHeader, // Removed RwLock - header should be immutable after creation
+    pub header: TriadHeader,
+    pub transactions: Vec<Transaction>, // Added field to store transactions
     pub state: RwLock<TriadState>,
     pub children: RwLock<[Option<Arc<RwLock<Triad>>>; 4]>,
     pub parent: Option<Weak<RwLock<Triad>>>,
@@ -106,6 +119,7 @@ impl Triad {
                 timestamp: current_unix_time as i64,
                 validator_sigs: [None; 15],
             },
+            transactions: Vec::new(), // Initialize transactions vector
             state: RwLock::new(TriadState::new()),
             children: RwLock::new([None, None, None, None]), // Corrected initialization for non-Copy type
             parent,
@@ -165,4 +179,34 @@ impl Triad {
         let parent = parent_arc.read();
         parent.propagate_state();
     }
-          }
+
+    /// Adds a transaction to this Triad if capacity allows.
+    /// Updates transaction count and re-calculates tx_root.
+    pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
+        if self.header.tx_count >= self.header.max_capacity {
+            return Err(format!(
+                "Triad at maximum capacity ({} transactions). Cannot add more.",
+                self.header.max_capacity
+            ));
+        }
+
+        self.transactions.push(transaction);
+        self.header.tx_count += 1;
+
+        // Update tx_root. This is a simplified version.
+        // A proper Merkle root should be calculated.
+        // For now, hash all transaction senders + nonces as a placeholder.
+        let mut tx_data_for_root = Vec::new();
+        for tx in &self.transactions {
+            tx_data_for_root.extend_from_slice(&tx.sender);
+            tx_data_for_root.extend_from_slice(&tx.nonce.to_be_bytes());
+        }
+        if tx_data_for_root.is_empty() {
+            self.header.tx_root = [0; 32]; // Or some defined empty root
+        } else {
+            self.header.tx_root = blake3_hash(&tx_data_for_root);
+        }
+
+        Ok(())
+    }
+}
