@@ -124,6 +124,26 @@ pub struct Triad {
 }
 
 impl Triad {
+    /// Creates a new `Triad` node with the specified level, position, and optional parent.
+    ///
+    /// The node's header is initialized with a hash of its position, a parent hash (if a parent is provided),
+    /// a dynamic maximum capacity based on its level, and the current Unix timestamp. The state and children
+    /// are initialized as empty, and the parent reference is set if provided.
+    ///
+    /// # Parameters
+    /// - `level`: The depth of the node in the hierarchy.
+    /// - `position`: A string identifier for the node's position.
+    /// - `parent`: An optional weak reference to the parent node.
+    ///
+    /// # Returns
+    /// An `Arc<RwLock<Triad>>` containing the newly created node.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let root = Triad::new(0, "root".to_string(), None);
+    /// let child = Triad::new(1, "child".to_string(), Some(Arc::downgrade(&root)));
+    /// ```
     pub fn new(
         level: u64,
         position: String,

@@ -7,6 +7,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     // use std::collections::BTreeMap; // Removed unused import
 
+    /// Creates a sample `TriadHeader` instance with preset values for use in tests.
+    ///
+    /// The returned header uses fixed values for all fields, suitable for deterministic testing of encoding and hashing logic.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let header = default_header();
+    /// assert_eq!(header.level, 1);
+    /// assert_eq!(header.position, "01");
+    /// ```
     fn default_header() -> TriadHeader {
         TriadHeader {
             level: 1,
@@ -41,7 +52,7 @@ mod tests {
         assert_eq!(encoded_bytes, expected_bytes, "Canonical encoding did not match expected bytes.");
     }
 
-    #[test]
+    /// Tests that a genesis `Triad` (level 0, no parent) has a zeroed parent hash, correct level, max capacity, and a timestamp within the creation window.
     fn test_parent_hash_calculation_genesis() {
         let time_before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         // Genesis triad (no parent)
@@ -57,7 +68,8 @@ mod tests {
                 "Genesis timestamp {} should be between {} and {}", genesis_triad.header.timestamp, time_before, time_after);
     }
 
-    #[test]
+    /// Tests that a child triad correctly computes its `parent_hash` as the hash of the parent's canonical encoding,
+    /// and verifies that header fields such as level, max capacity, and timestamp are set as expected for both parent and child triads.
     fn test_parent_hash_calculation_with_parent() {
         // Create a parent triad
         let parent_level = 0u64;
@@ -110,7 +122,7 @@ mod tests {
                 "Child timestamp {} should be between {} and {}", child_triad.header.timestamp, child_time_before, child_time_after);
     }
     
-    #[test]
+    /// Tests that a genesis `Triad` is correctly initialized as a root with the expected max capacity and a timestamp within the creation window.
     fn test_genesis_creation() { // This is somewhat redundant with test_parent_hash_calculation_genesis now
         let time_before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         let genesis_arc = Triad::new(0, "0".to_string(), None);
@@ -122,7 +134,11 @@ mod tests {
         assert!(triad.header.timestamp >= time_before && triad.header.timestamp <= time_after);
     }
 
-    #[test]
+    /// Tests that the `max_capacity` field of a `Triad` is correctly calculated for various levels.
+    ///
+    /// This test iterates over several triad levels and their expected maximum capacities,
+    /// creates a `Triad` at each level, and asserts that the computed `max_capacity` matches
+    /// the expected value based on the scaling formula.
     fn test_triad_max_capacity_various_levels() {
         let levels_and_expected_capacities = [
             (0u64, 1000u16),
