@@ -33,6 +33,11 @@ impl TriadHeader {
         bytes.extend(self.timestamp.to_be_bytes());
         bytes
     }
+
+    /// Computes the hash of the TriadHeader using its canonical encoding.
+    pub fn hash(&self) -> [u8; 32] {
+        blake3_hash(&self.canonical_encoding())
+    }
 }
 
 #[derive(Debug, Clone)]
