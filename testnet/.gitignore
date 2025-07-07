@@ -1,0 +1,9 @@
+# Ignore Rust build artifacts
+target/
+
+# Ignore other common Rust files
+Cargo.lock
+# If there are specific IDE files or OS files, they can be added too
+# e.g. .DS_Store
+# e.g. .idea/
+# e.g. *.swp
