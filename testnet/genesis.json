@@ -1,0 +1,8 @@
+{
+  "genesis_triad": {
+    "position": "0",
+    "state_root": "0000000000000000000000000000000000000000000000000000000000000000",
+    "timestamp": 1720314000
+  },
+  "comment": "Initial genesis placeholder - to be implemented"
+}
