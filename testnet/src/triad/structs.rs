@@ -1,12 +1,8 @@
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 use std::collections::BTreeMap;
-use blake3;
-
-// Helper function for BLAKE3 hashing
-fn blake3_hash(data: &[u8]) -> [u8; 32] {
-    *blake3::hash(data).as_bytes()
-}
+// Removed direct blake3 import as it's now encapsulated in crypto::hash
+use crate::crypto::hash::blake3_hash; // Import the centralized blake3_hash
 
 #[derive(Debug, Clone)]
 pub struct TriadHeader {
@@ -105,7 +101,7 @@ impl Triad {
                 validator_sigs: [None; 15],
             },
             state: RwLock::new(TriadState::new()),
-            children: RwLock::new([None; 4]),
+            children: RwLock::new([None, None, None, None]), // Corrected initialization for non-Copy type
             parent,
         }))
     }
