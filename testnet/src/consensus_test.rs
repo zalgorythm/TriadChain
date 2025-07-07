@@ -192,4 +192,57 @@ mod tests {
         // For now, we rely on testing calculate_difficulty_target thoroughly and assume the comparison in
         // verify_split_challenge is correct.
     }
+
+    #[test]
+    fn test_assign_to_quadrant() {
+        let pubkey1 = [0xAAu8; 32];
+        let pubkey2 = [0xBBu8; 32];
+        let position1 = "triad_pos_1";
+        let position2 = "triad_pos_2_long_string";
+
+        // Test 1: Basic assignment
+        let quadrant1 = crate::consensus::assign_to_quadrant(&pubkey1, position1);
+        assert!(quadrant1 <= 3, "Quadrant should be 0, 1, 2, or 3. Got {}", quadrant1);
+
+        // Test 2: Different pubkey, same position
+        let quadrant2 = crate::consensus::assign_to_quadrant(&pubkey2, position1);
+        assert!(quadrant2 <= 3, "Quadrant should be 0, 1, 2, or 3. Got {}", quadrant2);
+        // It's highly probable they are different, but not guaranteed for all inputs.
+        // A fixed seed for RNG in tests or more varied inputs would be better for stronger assertion of distribution.
+        // For now, just check validity. If quadrant1 == quadrant2, it's not necessarily a bug.
+
+        // Test 3: Same pubkey, different position
+        let quadrant3 = crate::consensus::assign_to_quadrant(&pubkey1, position2);
+        assert!(quadrant3 <= 3, "Quadrant should be 0, 1, 2, or 3. Got {}", quadrant3);
+
+        // Test 4: Manual verification for one specific case
+        let pk_manual = [0x01u8; 32];
+        let pos_manual = "manual_pos";
+
+        let pos_bytes_manual = pos_manual.as_bytes();
+        let pos_hash_manual = crate::crypto::hash::blake3_hash(pos_bytes_manual);
+
+        let mut input_final_manual = Vec::with_capacity(32 + 32);
+        input_final_manual.extend_from_slice(&pk_manual);
+        input_final_manual.extend_from_slice(&pos_hash_manual);
+        let final_hash_manual = crate::crypto::hash::blake3_hash(&input_final_manual);
+
+        let expected_quadrant_manual = final_hash_manual[0] % 4;
+        let calculated_quadrant_manual = crate::consensus::assign_to_quadrant(&pk_manual, pos_manual);
+
+        assert_eq!(calculated_quadrant_manual, expected_quadrant_manual,
+            "Manually calculated quadrant does not match function output.");
+
+        // Test 5: Ensure output is always within 0..=3 with more varied inputs
+        for i in 0..10 {
+            let mut pk_varied = [0u8; 32];
+            pk_varied[0] = i as u8;
+            pk_varied[1] = (i*i) as u8;
+            let pos_varied = format!("pos_varied_{}", i);
+            let quadrant_varied = crate::consensus::assign_to_quadrant(&pk_varied, &pos_varied);
+            assert!(quadrant_varied <= 3,
+                "Quadrant for pk=[{}.?..], pos={} was {}, expected 0..=3",
+                pk_varied[0], pos_varied, quadrant_varied);
+        }
+    }
 }

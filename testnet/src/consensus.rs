@@ -1,5 +1,12 @@
 // consensus.rs
 
+/// Represents a validator in the system.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added common derives
+pub struct Validator {
+    pub pubkey: [u8; 32],
+    // Could add other fields later, like stake, ID, etc.
+}
+
 /// Helper function to perform a bit-wise right shift on a 32-byte array.
 /// Shifts are performed in place.
 fn right_shift_byte_array(arr: &mut [u8; 32], mut shift_amount: u64) {
@@ -93,4 +100,28 @@ pub fn verify_split_challenge(
     // Perform lexicographical comparison of byte arrays.
     // H < T is true if computed_hash is lexicographically smaller than target.
     computed_hash < target
+}
+
+/// Assigns a validator to a quadrant (0-3) for a given Triad position.
+///
+/// The assignment is determined by:
+/// `BLAKE3(validator_pubkey || BLAKE3(triad_position_string))[0] % 4`
+///
+/// # Arguments
+/// * `pubkey`: The public key of the validator.
+/// * `position`: The canonical Sierpinski coordinate string of the Triad.
+///
+/// # Returns
+/// A `u8` value (0, 1, 2, or 3) representing the assigned quadrant.
+pub fn assign_to_quadrant(pubkey: &[u8; 32], position: &str) -> u8 {
+    let pos_bytes = position.as_bytes();
+    let pos_hash = blake3_hash(pos_bytes); // pos_hash is [u8; 32]
+
+    let mut input_for_final_hash = Vec::with_capacity(32 + 32);
+    input_for_final_hash.extend_from_slice(pubkey);
+    input_for_final_hash.extend_from_slice(&pos_hash); // Pass as slice
+
+    let final_hash = blake3_hash(&input_for_final_hash);
+
+    final_hash[0] % 4
 }
