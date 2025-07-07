@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH}; // Added for timestamp
 // Removed direct blake3 import as it's now encapsulated in crypto::hash
 use crate::crypto::hash::blake3_hash; // Import the centralized blake3_hash
 
@@ -77,6 +78,11 @@ impl Triad {
         parent: Option<Weak<RwLock<Triad>>>,
     ) -> Arc<RwLock<Self>> {
         let position_hash = blake3_hash(position.as_bytes());
+
+        let current_unix_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime before UNIX EPOCH or clock error")
+            .as_secs();
         
         // Calculate parent hash without locking parent
         let parent_hash = parent.as_ref().and_then(|weak| {
@@ -95,9 +101,9 @@ impl Triad {
                 tx_root: [0; 32],
                 state_root: TriadState::new().root,
                 tx_count: 0,
-                max_capacity: 1000,
+                max_capacity: (1000.0 * (1.0 + 0.004 * level as f64)) as u16,
                 split_nonce: 0,
-                timestamp: 0, // Should use system time
+                timestamp: current_unix_time as i64,
                 validator_sigs: [None; 15],
             },
             state: RwLock::new(TriadState::new()),
