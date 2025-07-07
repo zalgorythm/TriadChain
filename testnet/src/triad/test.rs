@@ -279,3 +279,320 @@ mod tests {
         assert_eq!(state.root, blake3_hash(b"empty_state_root"), "Root should be empty_state_root after removing all keys");
     }
 }
+
+    #[test]
+    fn test_triad_header_canonical_encoding_edge_cases() {
+        // Test with empty position
+        let mut header = default_header();
+        header.position = "".to_string();
+        header.position_hash = blake3_hash(b"");
+        
+        let encoded = header.canonical_encoding();
+        assert!(!encoded.is_empty(), "Canonical encoding should not be empty even with empty position");
+        
+        // Test with very long position
+        header.position = "a".repeat(1000);
+        header.position_hash = blake3_hash(header.position.as_bytes());
+        let encoded_long = header.canonical_encoding();
+        assert!(encoded_long.len() > encoded.len(), "Encoding with long position should be longer");
+    }
+
+    #[test]
+    fn test_triad_header_canonical_encoding_deterministic() {
+        let header1 = default_header();
+        let header2 = default_header();
+        
+        assert_eq!(header1.canonical_encoding(), header2.canonical_encoding(), 
+                   "Identical headers should produce identical canonical encodings");
+    }
+
+    #[test]
+    fn test_triad_header_canonical_encoding_field_order() {
+        let mut header = default_header();
+        let original_encoding = header.canonical_encoding();
+        
+        // Modify different fields and ensure encoding changes
+        header.level = 999;
+        let level_modified = header.canonical_encoding();
+        assert_ne!(original_encoding, level_modified, "Level change should affect encoding");
+        
+        header = default_header();
+        header.tx_count = 999;
+        let tx_count_modified = header.canonical_encoding();
+        assert_ne!(original_encoding, tx_count_modified, "TX count change should affect encoding");
+        
+        header = default_header();
+        header.max_capacity = 9999;
+        let capacity_modified = header.canonical_encoding();
+        assert_ne!(original_encoding, capacity_modified, "Max capacity change should affect encoding");
+    }
+
+    #[test]
+    fn test_triad_creation_with_invalid_weak_parent() {
+        // Test creating a triad with a weak reference that might be dropped
+        let parent_arc = Triad::new(0, "parent".to_string(), None);
+        let weak_parent = Arc::downgrade(&parent_arc);
+        
+        // Drop the strong reference
+        drop(parent_arc);
+        
+        // This should handle the case where parent is dropped
+        let child_arc = Triad::new(1, "child".to_string(), Some(weak_parent));
+        let child = child_arc.read();
+        
+        // The child should still be created but with zero parent hash
+        assert_eq!(child.header.parent_hash, [0u8; 32], "Child with dropped parent should have zero parent hash");
+    }
+
+    #[test]
+    fn test_triad_position_hash_calculation() {
+        let positions = vec!["0", "00", "01", "10", "11", "000", "001", "010", "011", "100", "101", "110", "111"];
+        
+        for position in positions {
+            let triad_arc = Triad::new(1, position.to_string(), None);
+            let triad = triad_arc.read();
+            
+            let expected_hash = blake3_hash(position.as_bytes());
+            assert_eq!(triad.header.position_hash, expected_hash,
+                       "Position hash for '{}' should match blake3 hash of position bytes", position);
+        }
+    }
+
+    #[test]
+    fn test_triad_max_capacity_boundary_values() {
+        let boundary_cases = [
+            (0u64, 1000u16),
+            (1u64, 1004u16),
+            (249u64, 1996u16),
+            (250u64, 2000u16), // Exactly double
+            (251u64, 2004u16),
+            (500u64, 3000u16),
+            (1000u64, 5000u16),
+        ];
+        
+        for (level, expected_capacity) in boundary_cases.iter() {
+            let triad_arc = Triad::new(*level, format!("level-{}", level), None);
+            let triad = triad_arc.read();
+            assert_eq!(triad.header.max_capacity, *expected_capacity,
+                       "Max capacity for level {} should be {} but got {}",
+                       level, expected_capacity, triad.header.max_capacity);
+        }
+    }
+
+    #[test]
+    fn test_triad_max_capacity_formula() {
+        // Test the formula: 1000 * (1 + 0.004 * level)
+        for level in 0..=100 {
+            let expected = (1000.0 * (1.0 + 0.004 * level as f64)) as u16;
+            let triad_arc = Triad::new(level, format!("test-{}", level), None);
+            let triad = triad_arc.read();
+            assert_eq!(triad.header.max_capacity, expected,
+                       "Max capacity formula failed for level {}", level);
+        }
+    }
+
+    #[test]
+    fn test_triad_timestamp_bounds() {
+        let time_before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let triad_arc = Triad::new(0, "timestamp_test".to_string(), None);
+        let time_after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        
+        let triad = triad_arc.read();
+        assert!(triad.header.timestamp >= time_before,
+                "Timestamp {} should be >= {}", triad.header.timestamp, time_before);
+        assert!(triad.header.timestamp <= time_after,
+                "Timestamp {} should be <= {}", triad.header.timestamp, time_after);
+        assert!(triad.header.timestamp > 0, "Timestamp should be positive");
+    }
+
+    #[test]
+    fn test_triad_deep_hierarchy() {
+        let mut current_parent = Triad::new(0, "root".to_string(), None);
+        let mut expected_capacity = 1000u16;
+        
+        for level in 1..=10 {
+            expected_capacity = (1000.0 * (1.0 + 0.004 * level as f64)) as u16;
+            let child = Triad::new(level, format!("child-{}", level), Some(Arc::downgrade(&current_parent)));
+            
+            let child_read = child.read();
+            assert_eq!(child_read.header.level, level, "Level should match");
+            assert_eq!(child_read.header.max_capacity, expected_capacity, "Capacity should match for level {}", level);
+            assert_ne!(child_read.header.parent_hash, [0u8; 32], "Non-genesis should have non-zero parent hash");
+            
+            current_parent = child;
+        }
+    }
+
+    #[test]
+    fn test_triad_concurrent_access() {
+        use std::thread;
+        use std::sync::Arc;
+        
+        let triad_arc = Triad::new(0, "concurrent_test".to_string(), None);
+        let triad_arc_clone = Arc::clone(&triad_arc);
+        
+        let handles: Vec<_> = (0..10).map(|i| {
+            let triad_clone = Arc::clone(&triad_arc_clone);
+            thread::spawn(move || {
+                let triad = triad_clone.read();
+                assert_eq!(triad.header.level, 0);
+                assert_eq!(triad.header.position, "concurrent_test");
+                assert_eq!(triad.header.max_capacity, 1000);
+                i // Return something to satisfy the closure
+            })
+        }).collect();
+        
+        for handle in handles {
+            handle.join().expect("Thread should complete successfully");
+        }
+    }
+
+    #[test]
+    fn test_triad_validator_signatures_initialization() {
+        let triad_arc = Triad::new(0, "validator_test".to_string(), None);
+        let triad = triad_arc.read();
+        
+        // Check that all validator signatures are initialized to None
+        for (i, sig) in triad.header.validator_sigs.iter().enumerate() {
+            assert!(sig.is_none(), "Validator signature at index {} should be None", i);
+        }
+        assert_eq!(triad.header.validator_sigs.len(), 15, "Should have exactly 15 validator signature slots");
+    }
+
+    #[test]
+    fn test_triad_split_nonce_initialization() {
+        let triad_arc = Triad::new(0, "nonce_test".to_string(), None);
+        let triad = triad_arc.read();
+        
+        // Split nonce should be initialized to some value
+        assert!(triad.header.split_nonce > 0, "Split nonce should be initialized to a positive value");
+    }
+
+    #[test]
+    fn test_triad_position_variations() {
+        let positions = vec![
+            "0", "1", "00", "01", "10", "11",
+            "000", "001", "010", "011", "100", "101", "110", "111",
+            "0000", "1111", "0101", "1010"
+        ];
+        
+        for position in positions {
+            let triad_arc = Triad::new(1, position.to_string(), None);
+            let triad = triad_arc.read();
+            
+            assert_eq!(triad.header.position, position, "Position should match input");
+            assert_eq!(triad.header.position_hash, blake3_hash(position.as_bytes()),
+                       "Position hash should match blake3 of position");
+        }
+    }
+
+    #[test]
+    fn test_triad_level_zero_characteristics() {
+        let triad_arc = Triad::new(0, "genesis".to_string(), None);
+        let triad = triad_arc.read();
+        
+        assert_eq!(triad.header.level, 0, "Level should be 0");
+        assert_eq!(triad.header.max_capacity, 1000, "Genesis capacity should be 1000");
+        assert_eq!(triad.header.parent_hash, [0u8; 32], "Genesis parent hash should be zero");
+        assert!(triad.is_root(), "Genesis should be root");
+    }
+
+    #[test]
+    fn test_triad_header_fields_initialization() {
+        let triad_arc = Triad::new(5, "test_position".to_string(), None);
+        let triad = triad_arc.read();
+        
+        // Test all fields are properly initialized
+        assert_eq!(triad.header.level, 5);
+        assert_eq!(triad.header.position, "test_position");
+        assert_eq!(triad.header.position_hash, blake3_hash(b"test_position"));
+        assert_eq!(triad.header.parent_hash, [0u8; 32]); // No parent
+        assert_eq!(triad.header.tx_root, [0u8; 32]); // Default initialization
+        assert_eq!(triad.header.state_root, [0u8; 32]); // Default initialization
+        assert_eq!(triad.header.tx_count, 0); // Default initialization
+        assert_eq!(triad.header.max_capacity, 1020); // 1000 * (1 + 0.004 * 5)
+        assert!(triad.header.split_nonce > 0);
+        assert!(triad.header.timestamp > 0);
+        assert_eq!(triad.header.validator_sigs.len(), 15);
+    }
+
+    #[test]
+    fn test_parent_hash_with_modified_parent_fields() {
+        let parent_arc = Triad::new(0, "parent".to_string(), None);
+        
+        // Modify parent fields that affect canonical encoding
+        {
+            let mut parent = parent_arc.write();
+            parent.header.tx_root = [99u8; 32];
+            parent.header.state_root = [88u8; 32];
+            parent.header.tx_count = 42;
+            parent.header.timestamp = 1234567890;
+        }
+        
+        let parent_header = parent_arc.read().header.clone();
+        let expected_parent_hash = blake3_hash(&parent_header.canonical_encoding());
+        
+        let child_arc = Triad::new(1, "child".to_string(), Some(Arc::downgrade(&parent_arc)));
+        let child = child_arc.read();
+        
+        assert_eq!(child.header.parent_hash, expected_parent_hash,
+                   "Child parent hash should match hash of parent's canonical encoding");
+    }
+
+    #[test]
+    fn test_canonical_encoding_byte_order() {
+        let header = default_header();
+        let encoded = header.canonical_encoding();
+        
+        // Verify the encoding starts with the level (first 8 bytes in big-endian)
+        let level_bytes = &encoded[0..8];
+        assert_eq!(level_bytes, &header.level.to_be_bytes(),
+                   "First 8 bytes should be level in big-endian format");
+        
+        // Verify position comes next
+        let position_start = 8;
+        let position_end = position_start + header.position.len();
+        let position_bytes = &encoded[position_start..position_end];
+        assert_eq!(position_bytes, header.position.as_bytes(),
+                   "Position bytes should follow level");
+    }
+
+    #[test]
+    fn test_multiple_triads_unique_hashes() {
+        let triad1 = Triad::new(1, "01".to_string(), None);
+        let triad2 = Triad::new(1, "10".to_string(), None);
+        let triad3 = Triad::new(2, "01".to_string(), None);
+        
+        let hash1 = triad1.read().header.position_hash;
+        let hash2 = triad2.read().header.position_hash;
+        let hash3 = triad3.read().header.position_hash;
+        
+        assert_ne!(hash1, hash2, "Different positions should have different hashes");
+        assert_eq!(hash1, hash3, "Same position should have same hash regardless of level");
+    }
+
+    #[test]
+    fn test_is_root_method() {
+        let root_triad = Triad::new(0, "root".to_string(), None);
+        let non_root_triad = Triad::new(1, "non_root".to_string(), None);
+        
+        assert!(root_triad.read().is_root(), "Level 0 triad should be root");
+        assert!(!non_root_triad.read().is_root(), "Level 1 triad should not be root");
+    }
+
+    #[test]
+    fn test_triad_memory_layout() {
+        let triad_arc = Triad::new(0, "memory_test".to_string(), None);
+        
+        // Test that we can create multiple references without issues
+        let weak_ref = Arc::downgrade(&triad_arc);
+        let strong_ref = Arc::clone(&triad_arc);
+        
+        assert!(weak_ref.upgrade().is_some(), "Weak reference should be upgradeable");
+        
+        drop(strong_ref);
+        assert!(weak_ref.upgrade().is_some(), "Weak reference should still be upgradeable");
+        
+        drop(triad_arc);
+        assert!(weak_ref.upgrade().is_none(), "Weak reference should not be upgradeable after dropping all strong refs");
+    }
