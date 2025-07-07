@@ -64,14 +64,48 @@ impl TriadState {
     }
 
     pub fn recompute_root(&mut self) {
-        // Simplified for example - real implementation would use Merkle tree
-        let mut combined = Vec::new();
-        for (key, value) in &self.storage {
-            combined.extend(key);
-            combined.extend(value);
+        if self.storage.is_empty() {
+            self.root = blake3_hash(b"empty_state_root");
+        } else {
+            let leaf_hashes: Vec<[u8; 32]> = self.storage.iter() // Removed mut
+                .map(|(key, value)| {
+                    let mut leaf_data = Vec::new();
+                    leaf_data.extend_from_slice(key); // key is already [u8; 32]
+                    leaf_data.extend_from_slice(&blake3_hash(value)); // value is Vec<u8>
+                    blake3_hash(&leaf_data)
+                })
+                .collect();
+
+            self.root = Self::build_merkle_tree_recursive(leaf_hashes);
         }
-        self.root = blake3_hash(&combined);
         self.version += 1;
+    }
+
+    // Helper function to recursively build the Merkle tree
+    fn build_merkle_tree_recursive(mut hashes: Vec<[u8; 32]>) -> [u8; 32] {
+        if hashes.is_empty() {
+            // This case should be handled by the caller (recompute_root)
+            // or return a predefined hash for empty list if called directly.
+            // For safety, returning the "empty_state_root" hash.
+            return blake3_hash(b"empty_state_root_internal_unexpected");
+        }
+        if hashes.len() == 1 {
+            return hashes[0];
+        }
+
+        // If odd number of hashes, duplicate the last one
+        if hashes.len() % 2 != 0 {
+            hashes.push(hashes.last().unwrap().clone());
+        }
+
+        let mut next_level_hashes = Vec::new();
+        for chunk in hashes.chunks_exact(2) {
+            let mut combined_hash_data = Vec::new();
+            combined_hash_data.extend_from_slice(&chunk[0]);
+            combined_hash_data.extend_from_slice(&chunk[1]);
+            next_level_hashes.push(blake3_hash(&combined_hash_data));
+        }
+        Self::build_merkle_tree_recursive(next_level_hashes)
     }
 }
 

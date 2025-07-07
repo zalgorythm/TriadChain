@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod tests {
     // Reverted to more explicit imports as `use super::*;` was not resolving Triad/TriadHeader
-    use crate::triad::{Triad, TriadHeader};
+    use crate::triad::{Triad, TriadHeader, TriadState};
     use crate::crypto::hash::blake3_hash;
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH}; // Removed unused Duration
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // use std::collections::BTreeMap; // Removed unused import
 
     fn default_header() -> TriadHeader {
         TriadHeader {
@@ -138,5 +139,127 @@ mod tests {
                        "Max capacity for level {} was expected to be {} but got {}",
                        level, expected_capacity, triad.header.max_capacity);
         }
+    }
+
+    // --- Tests for TriadState::recompute_root ---
+
+    fn key_val(k: u8, v_str: &str) -> ([u8; 32], Vec<u8>) {
+        let mut key = [0u8; 32];
+        key[0] = k;
+        (key, v_str.as_bytes().to_vec())
+    }
+
+    // Helper to compute leaf hash as per TriadState logic
+    fn compute_leaf_hash(key: &[u8; 32], value: &Vec<u8>) -> [u8; 32] {
+        let mut leaf_data = Vec::new();
+        leaf_data.extend_from_slice(key);
+        leaf_data.extend_from_slice(&blake3_hash(value));
+        blake3_hash(&leaf_data)
+    }
+
+    // Helper to compute internal Merkle node hash
+    fn compute_internal_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut data = Vec::new();
+        data.extend_from_slice(left);
+        data.extend_from_slice(right);
+        blake3_hash(&data)
+    }
+
+    #[test]
+    fn test_triad_state_recompute_root_empty() {
+        let mut state = TriadState::new(); // New already computes root once.
+        assert_eq!(state.root, blake3_hash(b"empty_state_root"), "Default empty root mismatch");
+
+        state.recompute_root(); // Recompute on an already empty state
+        assert_eq!(state.root, blake3_hash(b"empty_state_root"), "Recomputed empty root mismatch");
+        assert_eq!(state.version, 1, "Version should be 1 after one recompute");
+    }
+
+    #[test]
+    fn test_triad_state_recompute_root_single_leaf() {
+        let mut state = TriadState::new();
+        let (k1, v1) = key_val(1, "value1");
+        state.storage.insert(k1.clone(), v1.clone());
+        state.recompute_root();
+
+        let expected_root = compute_leaf_hash(&k1, &v1);
+        assert_eq!(state.root, expected_root, "Root for single leaf mismatch");
+    }
+
+    #[test]
+    fn test_triad_state_recompute_root_two_leaves() {
+        let mut state = TriadState::new();
+        let (k1, v1) = key_val(1, "value1");
+        let (k2, v2) = key_val(2, "value2"); // BTreeMap sorts by key
+
+        state.storage.insert(k1.clone(), v1.clone());
+        state.storage.insert(k2.clone(), v2.clone());
+        state.recompute_root();
+
+        let leaf1_hash = compute_leaf_hash(&k1, &v1);
+        let leaf2_hash = compute_leaf_hash(&k2, &v2);
+        let expected_root = compute_internal_node_hash(&leaf1_hash, &leaf2_hash);
+
+        assert_eq!(state.root, expected_root, "Root for two leaves mismatch");
+    }
+
+    #[test]
+    fn test_triad_state_recompute_root_three_leaves() {
+        let mut state = TriadState::new();
+        let (k1, v1) = key_val(1, "value1");
+        let (k2, v2) = key_val(2, "value2");
+        let (k3, v3) = key_val(3, "value3");
+
+        state.storage.insert(k1.clone(), v1.clone());
+        state.storage.insert(k2.clone(), v2.clone());
+        state.storage.insert(k3.clone(), v3.clone());
+        state.recompute_root();
+
+        let leaf1_hash = compute_leaf_hash(&k1, &v1);
+        let leaf2_hash = compute_leaf_hash(&k2, &v2);
+        let leaf3_hash = compute_leaf_hash(&k3, &v3);
+
+        // Level 1 hashes: H(L1,L2), H(L3,L3) because L3 is duplicated
+        let node12_hash = compute_internal_node_hash(&leaf1_hash, &leaf2_hash);
+        let node33_hash = compute_internal_node_hash(&leaf3_hash, &leaf3_hash); // L3 duplicated
+
+        // Level 2 hash (root): H(H(L1,L2), H(L3,L3))
+        let expected_root = compute_internal_node_hash(&node12_hash, &node33_hash);
+
+        assert_eq!(state.root, expected_root, "Root for three leaves mismatch");
+    }
+
+    #[test]
+    fn test_triad_state_root_changes_on_modification() {
+        let mut state = TriadState::new();
+        let (k1, v1_initial) = key_val(1, "initial_value");
+        state.storage.insert(k1.clone(), v1_initial);
+        state.recompute_root();
+        let root1 = state.root;
+
+        // Modify value
+        let v1_modified = "modified_value".as_bytes().to_vec();
+        state.storage.insert(k1.clone(), v1_modified);
+        state.recompute_root();
+        let root2 = state.root;
+        assert_ne!(root1, root2, "Root should change when a value is modified");
+
+        // Add new key
+        let (k2, v2) = key_val(2, "another_value");
+        state.storage.insert(k2, v2);
+        state.recompute_root();
+        let root3 = state.root;
+        assert_ne!(root2, root3, "Root should change when a new key is added");
+
+        // Remove a key
+        state.storage.remove(&k1);
+        state.recompute_root();
+        let root4 = state.root;
+        assert_ne!(root3, root4, "Root should change when a key is removed");
+
+        // Remove last key, should go to empty root
+        state.storage.remove(&k2);
+        state.recompute_root();
+        assert_eq!(state.root, blake3_hash(b"empty_state_root"), "Root should be empty_state_root after removing all keys");
     }
 }
