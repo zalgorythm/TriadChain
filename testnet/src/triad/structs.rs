@@ -1,271 +1,390 @@
-use parking_lot::RwLock;
-use std::sync::{Arc, Weak};
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH}; // Added for timestamp
-// Removed direct blake3 import as it's now encapsulated in crypto::hash
-use crate::crypto::hash::blake3_hash; // Import the centralized blake3_hash
+// src/triad/structs.rs
 
-#[derive(Debug, Clone, PartialEq, Eq)] // Added PartialEq, Eq
+//! TriadChain Triad Structs Module
+//!
+//! This module defines the core data structures for TriadChain triads (blocks),
+//! including `TriadHeader` and `Triad`. It also provides methods for
+//! calculating transaction Merkle roots, hashing triad headers, and validating
+//! complete triads.
+
+use blake3::Hasher;
+#[allow(unused_imports)] // Serialize and Deserialize are for future use
+use serde::{Serialize, Deserialize};
+
+// Corrected import paths and removed unused ones
+// TriadError is used in Triad::validate return type
+use crate::errors::TriadError;
+use crate::transaction::SignedTransaction;
+use crate::state::merkle::MerkleTree; // Import MerkleTree for transaction root calculation
+
+// Imports only used in tests, moved into cfg(test) block
+// use crate::state::state_tree::StateTree;
+// use crate::crypto::hash::blake3_hash;
+
+
+/// The fixed size of a BLAKE3 hash output in bytes.
+pub const HASH_SIZE: usize = 32;
+
+/// Represents the header of a TriadChain triad (block).
+///
+/// Contains metadata necessary for chaining triads and validating their integrity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriadHeader {
-    pub level: u64,
-    pub position: String,
-    pub position_hash: [u8; 32],
-    pub parent_hash: [u8; 32],
-    pub tx_root: [u8; 32],
-    pub state_root: [u8; 32],
-    pub tx_count: u16,
-    pub max_capacity: u16,
-    pub split_nonce: u128,
-    pub timestamp: i64,
-    pub validator_sigs: [Option<[u8; 64]>; 15],
+    /// The version of the triad structure.
+    pub version: u32,
+    /// The hash of the previous triad's header, forming the blockchain link.
+    pub previous_triad_hash: [u8; HASH_SIZE],
+    /// The Merkle root of all transactions included in this triad.
+    pub transactions_merkle_root: [u8; HASH_SIZE],
+    /// The Merkle root of the state tree after applying transactions in this triad.
+    pub state_merkle_root: [u8; HASH_SIZE],
+    /// The timestamp when the triad was created (Unix epoch time).
+    pub timestamp: u64,
+    /// A random nonce used for Proof-of-Work (mining).
+    pub nonce: u64,
+    /// The target difficulty threshold for this triad (e.g., in compact form).
+    pub difficulty_target: u64,
 }
 
 impl TriadHeader {
-    pub fn canonical_encoding(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend(self.level.to_be_bytes());
-        bytes.extend(self.position.as_bytes());
-        bytes.extend(self.position_hash);
-        bytes.extend(self.tx_root);
-        bytes.extend(self.state_root);
-        bytes.extend(self.tx_count.to_be_bytes());
-        bytes.extend(self.max_capacity.to_be_bytes());
-        bytes.extend(self.timestamp.to_be_bytes());
-        bytes
-    }
-
-    /// Computes the hash of the TriadHeader using its canonical encoding.
-    pub fn hash(&self) -> [u8; 32] {
-        blake3_hash(&self.canonical_encoding())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Transaction {
-    pub version: u8,
-    pub nonce: u64,
-    pub sender: [u8; 32],    // Public key hash
-    pub recipient: [u8; 32], // Public key hash
-    pub amount: u64,
-    pub gas_limit: u64,
-    pub signature: [u8; 64], // Ed25519 signature
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TriadState {
-    pub storage: BTreeMap<[u8; 32], Vec<u8>>,
-    pub root: [u8; 32],
-    pub version: u64,
-}
-
-impl TriadState {
-    pub fn new() -> Self {
-        Self {
-            storage: BTreeMap::new(),
-            root: blake3_hash(b"empty_state_root"),
-            version: 0,
+    /// Creates a new `TriadHeader`.
+    ///
+    /// # Arguments
+    /// * `version` - The triad version.
+    /// * `previous_triad_hash` - The hash of the previous triad.
+    /// * `transactions_merkle_root` - The Merkle root of transactions.
+    /// * `state_merkle_root` - The Merkle root of the state.
+    /// * `timestamp` - The timestamp.
+    /// * `nonce` - The nonce.
+    /// * `difficulty_target` - The difficulty target.
+    ///
+    /// # Returns
+    /// A new `TriadHeader` instance.
+    pub fn new(
+        version: u32,
+        previous_triad_hash: [u8; HASH_SIZE],
+        transactions_merkle_root: [u8; HASH_SIZE],
+        state_merkle_root: [u8; HASH_SIZE],
+        timestamp: u64,
+        nonce: u64,
+        difficulty_target: u64,
+    ) -> Self {
+        TriadHeader {
+            version,
+            previous_triad_hash,
+            transactions_merkle_root,
+            state_merkle_root,
+            timestamp,
+            nonce,
+            difficulty_target,
         }
     }
 
-    pub fn recompute_root(&mut self) {
-        if self.storage.is_empty() {
-            self.root = blake3_hash(b"empty_state_root");
-        } else {
-            let leaf_hashes: Vec<[u8; 32]> = self.storage.iter() // Removed mut
-                .map(|(key, value)| {
-                    let mut leaf_data = Vec::new();
-                    leaf_data.extend_from_slice(key); // key is already [u8; 32]
-                    leaf_data.extend_from_slice(&blake3_hash(value)); // value is Vec<u8>
-                    blake3_hash(&leaf_data)
-                })
-                .collect();
-
-            self.root = Self::build_merkle_tree_recursive(leaf_hashes);
-        }
-        self.version += 1;
+    /// Computes the BLAKE3 hash of the `TriadHeader`.
+    ///
+    /// This hash uniquely identifies the triad header and is used in the Proof-of-Work.
+    ///
+    /// # Returns
+    /// A 32-byte array representing the BLAKE3 hash of the header.
+    pub fn calculate_hash(&self) -> [u8; HASH_SIZE] {
+        let mut hasher = Hasher::new();
+        hasher.update(&self.version.to_le_bytes()); // Use little-endian bytes
+        hasher.update(&self.previous_triad_hash);
+        hasher.update(&self.transactions_merkle_root);
+        hasher.update(&self.state_merkle_root);
+        hasher.update(&self.timestamp.to_le_bytes());
+        hasher.update(&self.nonce.to_le_bytes());
+        hasher.update(&self.difficulty_target.to_le_bytes());
+        hasher.finalize().as_bytes().clone()
     }
 
-    // Helper function to recursively build the Merkle tree
-    fn build_merkle_tree_recursive(mut hashes: Vec<[u8; 32]>) -> [u8; 32] {
-        if hashes.is_empty() {
-            // This case should be handled by the caller (recompute_root)
-            // or return a predefined hash for empty list if called directly.
-            // For safety, returning the "empty_state_root" hash.
-            return blake3_hash(b"empty_state_root_internal_unexpected");
-        }
-        if hashes.len() == 1 {
-            return hashes[0];
-        }
-
-        // If odd number of hashes, duplicate the last one
-        if hashes.len() % 2 != 0 {
-            hashes.push(hashes.last().unwrap().clone());
-        }
-
-        let mut next_level_hashes = Vec::new();
-        for chunk in hashes.chunks_exact(2) {
-            let mut combined_hash_data = Vec::new();
-            combined_hash_data.extend_from_slice(&chunk[0]);
-            combined_hash_data.extend_from_slice(&chunk[1]);
-            next_level_hashes.push(blake3_hash(&combined_hash_data));
-        }
-        Self::build_merkle_tree_recursive(next_level_hashes)
+    /// Placeholder for Proof-of-Work verification.
+    /// In a real implementation, this would check if `calculate_hash()` meets `difficulty_target`.
+    pub fn verify_pow(&self) -> bool {
+        // Dummy PoW verification: for now, just true.
+        // In reality, you'd compare self.calculate_hash() against the self.difficulty_target.
+        // E.g., `hash_to_u64(&self.calculate_hash()) <= self.difficulty_target`
+        true
     }
 }
 
-#[derive(Debug)]
+/// Represents a complete TriadChain triad (block).
+///
+/// Contains the `TriadHeader` and a list of `SignedTransaction`s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Triad {
+    /// The header of the triad.
     pub header: TriadHeader,
-    pub transactions: Vec<Transaction>, // Added field to store transactions
-    pub state: RwLock<TriadState>,
-    pub children: RwLock<[Option<Arc<RwLock<Triad>>>; 4]>,
-    pub parent: Option<Weak<RwLock<Triad>>>,
+    /// A list of signed transactions included in this triad.
+    pub transactions: Vec<SignedTransaction>,
 }
 
 impl Triad {
-    /// Creates a new `Triad` node with the specified level, position, and optional parent.
+    /// Creates a new `Triad`.
     ///
-    /// The node's header is initialized with a hash of its position, a parent hash (if a parent is provided),
-    /// a dynamic maximum capacity based on its level, and the current Unix timestamp. The state and children
-    /// are initialized as empty, and the parent reference is set if provided.
-    ///
-    /// # Parameters
-    /// - `level`: The depth of the node in the hierarchy.
-    /// - `position`: A string identifier for the node's position.
-    /// - `parent`: An optional weak reference to the parent node.
+    /// # Arguments
+    /// * `header` - The `TriadHeader` for this triad.
+    /// * `transactions` - A `Vec` of `SignedTransaction`s included in this triad.
     ///
     /// # Returns
-    /// An `Arc<RwLock<Triad>>` containing the newly created node.
+    /// A new `Triad` instance.
+    pub fn new(header: TriadHeader, transactions: Vec<SignedTransaction>) -> Self {
+        Triad {
+            header,
+            transactions,
+        }
+    }
+
+    /// Computes the Merkle root of all transactions in the triad.
     ///
-    /// # Examples
+    /// Each transaction is hashed, and these hashes form the leaves of a Merkle tree.
     ///
-    /// ```
-    /// let root = Triad::new(0, "root".to_string(), None);
-    /// let child = Triad::new(1, "child".to_string(), Some(Arc::downgrade(&root)));
-    /// ```
-    pub fn new(
-        level: u64,
-        position: String,
-        parent: Option<Weak<RwLock<Triad>>>,
-    ) -> Arc<RwLock<Self>> {
-        let position_hash = blake3_hash(position.as_bytes());
-
-        let current_unix_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime before UNIX EPOCH or clock error")
-            .as_secs();
-        
-        // Calculate parent hash without locking parent
-        let parent_hash = parent.as_ref().and_then(|weak| {
-            weak.upgrade().map(|arc| {
-                let parent = arc.read();
-                blake3_hash(&parent.header.canonical_encoding())
-            })
-        }).unwrap_or([0; 32]);
-
-        Arc::new(RwLock::new(Self {
-            header: TriadHeader {
-                level,
-                position,
-                position_hash,
-                parent_hash,
-                tx_root: [0; 32],
-                state_root: TriadState::new().root,
-                tx_count: 0,
-                max_capacity: (1000.0 * (1.0 + 0.004 * level as f64)) as u16,
-                split_nonce: 0,
-                timestamp: current_unix_time as i64,
-                validator_sigs: [None; 15],
-            },
-            transactions: Vec::new(), // Initialize transactions vector
-            state: RwLock::new(TriadState::new()),
-            children: RwLock::new([None, None, None, None]), // Corrected initialization for non-Copy type
-            parent,
-        }))
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.header.level == 0
-    }
-
-    pub fn update_child_root(&self, child_pos: &str, new_root: [u8; 32]) {
-        let key = blake3_hash(child_pos.as_bytes()); // Use BLAKE3(child_pos) as key
-
-        let mut state = self.state.write();
-        state.storage.insert(key, new_root.to_vec());
-        state.recompute_root();
-    }
-
-    pub fn add_child(&self, child: Arc<RwLock<Triad>>, index: usize) -> Result<(), &'static str> {
-        if index >= 4 {
-            return Err("Child index out of bounds (0-3)");
-        }
-        let mut children = self.children.write();
-        if children[index].is_some() {
-            return Err("Child already exists at this index");
-        }
-        children[index] = Some(child);
-        Ok(())
-    }
-
-    pub fn propagate_state(&self) {
-        if self.is_root() {
-            return;
+    /// # Returns
+    /// A 32-byte array representing the Merkle root of the transactions.
+    /// Returns an all-zero hash if there are no transactions.
+    pub fn calculate_transactions_merkle_root(&self) -> [u8; HASH_SIZE] {
+        if self.transactions.is_empty() {
+            return [0u8; HASH_SIZE]; // Return a fixed hash for an empty set of transactions
         }
 
-        // Capture current state before locking parent
-        let child_pos = self.header.position.clone();
-        let child_root = self.state.read().root;
+        let transaction_hashes: Vec<[u8; HASH_SIZE]> = self.transactions
+            .iter()
+            .map(|tx| tx.calculate_hash()) // Call calculate_hash on SignedTransaction
+            .collect();
 
-        let parent_weak = match &self.parent {
-            Some(weak) => weak.clone(),
-            None => return,
-        };
-
-        let parent_arc = match parent_weak.upgrade() {
-            Some(arc) => arc,
-            None => return,
-        };
-
-        // Update parent's state
-        {
-            let parent = parent_arc.write();
-            parent.update_child_root(&child_pos, child_root);
-        }
-
-        // Propagate further upward
-        let parent = parent_arc.read();
-        parent.propagate_state();
+        // Use the MerkleTree to compute the root
+        let merkle_tree = MerkleTree::new(transaction_hashes)
+            .expect("Failed to create MerkleTree from transaction hashes. This should not happen with non-empty list.");
+        merkle_tree.root()
     }
 
-    /// Adds a transaction to this Triad if capacity allows.
-    /// Updates transaction count and re-calculates tx_root.
-    pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
-        if self.header.tx_count >= self.header.max_capacity {
-            return Err(format!(
-                "Triad at maximum capacity ({} transactions). Cannot add more.",
-                self.header.max_capacity
+    /// Validates the triad, including its header and transactions.
+    ///
+    /// This is a high-level validation function that combines several checks.
+    ///
+    /// # Arguments
+    /// * `expected_state_merkle_root` - The expected Merkle root of the state tree *before*
+    ///                                  applying transactions in this triad. This is important
+    ///                                  for ensuring the previous state was correctly referenced.
+    /// # Returns
+    /// `Ok(())` if the triad is valid, or a `TriadError` if any validation fails.
+    pub fn validate(&self, expected_state_merkle_root: [u8; HASH_SIZE]) -> Result<(), TriadError> {
+        // 1. Verify Proof-of-Work (difficulty target)
+        if !self.header.verify_pow() {
+            return Err(TriadError::InvalidProofOfWork);
+        }
+
+        // 2. Verify `transactions_merkle_root` in header matches actual transactions.
+        let actual_transactions_merkle_root = self.calculate_transactions_merkle_root();
+        if self.header.transactions_merkle_root != actual_transactions_merkle_root {
+            return Err(TriadError::TransactionsMerkleRootMismatch(
+                self.header.transactions_merkle_root,
+                actual_transactions_merkle_root,
             ));
         }
 
-        self.transactions.push(transaction);
-        self.header.tx_count += 1;
+        // 3. Verify `state_merkle_root` in header matches the *expected* state root
+        //    (i.e., the state root of the parent block, if we consider chaining).
+        //    For actual state transition validation, a separate StateProcessor would be needed.
+        if self.header.state_merkle_root != expected_state_merkle_root {
+            return Err(TriadError::StateMerkleRootMismatch(
+                self.header.state_merkle_root,
+                expected_state_merkle_root,
+            ));
+        }
 
-        // Update tx_root. This is a simplified version.
-        // A proper Merkle root should be calculated.
-        // For now, hash all transaction senders + nonces as a placeholder.
-        let mut tx_data_for_root = Vec::new();
-        for tx in &self.transactions {
-            tx_data_for_root.extend_from_slice(&tx.sender);
-            tx_data_for_root.extend_from_slice(&tx.nonce.to_be_bytes());
+        // 4. Validate each transaction within the triad.
+        //    This assumes `validate_signed_transaction` internally handles signature verification
+        //    and other transaction-specific rules.
+        for (i, tx) in self.transactions.iter().enumerate() {
+            // TransactionError and ConsensusError are only used here within the loop
+            // for the error formatting, so their import is local.
+            #[allow(unused_imports)]
+            use crate::errors::{TransactionError, ConsensusError};
+            if let Err(e) = crate::transaction::validate_signed_transaction(tx) {
+                return Err(TriadError::TransactionValidationFailed(format!(
+                    "Transaction {} failed validation: {:?}",
+                    i, e
+                )));
+            }
         }
-        if tx_data_for_root.is_empty() {
-            self.header.tx_root = [0; 32]; // Or some defined empty root
-        } else {
-            self.header.tx_root = blake3_hash(&tx_data_for_root);
-        }
+
+        // 5. Placeholder for more complex validation (e.g., sequential nonce checks,
+        //    double-spend prevention, applying transactions to a temporary state).
+        //    This would typically require access to the current global state (StateTree).
 
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Explicitly import StateTree and blake3_hash only for tests
+    use crate::state::state_tree::StateTree;
+    use crate::crypto::hash::blake3_hash;
+    use crate::transaction::create_dummy_signed_transaction; // Keep SignedTransaction for test helper
+
+    /// Helper function to create a dummy triad header.
+    fn create_dummy_triad_header(
+        prev_hash: [u8; HASH_SIZE],
+        tx_merkle_root: [u8; HASH_SIZE],
+        state_merkle_root: [u8; HASH_SIZE],
+    ) -> TriadHeader {
+        TriadHeader::new(
+            1, // version
+            prev_hash,
+            tx_merkle_root,
+            state_merkle_root,
+            1678886400, // timestamp (Mar 15, 2023 00:00:00 UTC)
+            12345,      // nonce
+            1000,       // difficulty_target
+        )
+    }
+
+    /// Tests `TriadHeader` creation and hash calculation.
+    #[test]
+    fn test_triad_header_creation_and_hash() {
+        let prev_hash = [1u8; HASH_SIZE];
+        let tx_merkle_root = [2u8; HASH_SIZE];
+        let state_merkle_root = [3u8; HASH_SIZE];
+
+        let header = create_dummy_triad_header(prev_hash, tx_merkle_root, state_merkle_root);
+        let header_hash = header.calculate_hash();
+
+        // Ensure the hash is not all zeros (implies something was hashed)
+        assert_ne!(header_hash, [0u8; HASH_SIZE]);
+
+        // Change a field and ensure hash changes
+        let mut modified_header = header.clone();
+        modified_header.nonce = 54321;
+        assert_ne!(header_hash, modified_header.calculate_hash());
+
+        // Ensure consistency
+        let header_recalc = create_dummy_triad_header(prev_hash, tx_merkle_root, state_merkle_root);
+        assert_eq!(header_hash, header_recalc.calculate_hash());
+    }
+
+    /// Tests `Triad` creation.
+    #[test]
+    fn test_triad_creation() {
+        let dummy_header = create_dummy_triad_header([0u8; HASH_SIZE], [0u8; HASH_SIZE], [0u8; HASH_SIZE]);
+        let transactions = vec![
+            create_dummy_signed_transaction(b"addr1", b"addr2", 10, 1, 1, b""),
+            create_dummy_signed_transaction(b"addr3", b"addr4", 20, 2, 2, b""),
+        ];
+        let triad = Triad::new(dummy_header, transactions.clone());
+
+        assert_eq!(triad.transactions.len(), 2);
+        assert_eq!(triad.transactions[0], transactions[0]);
+    }
+
+    /// Tests `calculate_transactions_merkle_root`.
+    #[test]
+    fn test_calculate_transactions_merkle_root() {
+        let dummy_header = create_dummy_triad_header([0u8; HASH_SIZE], [0u8; HASH_SIZE], [0u8; HASH_SIZE]);
+
+        // Case 1: No transactions
+        let triad_empty = Triad::new(dummy_header.clone(), Vec::new());
+        assert_eq!(triad_empty.calculate_transactions_merkle_root(), [0u8; HASH_SIZE], "Empty transactions should yield zero hash root.");
+
+        // Case 2: With transactions
+        let tx1 = create_dummy_signed_transaction(b"A", b"B", 10, 1, 1, b"");
+        let tx2 = create_dummy_signed_transaction(b"C", b"D", 20, 2, 2, b"");
+        let transactions = vec![tx1.clone(), tx2.clone()];
+        let triad = Triad::new(dummy_header.clone(), transactions.clone());
+
+        let tx1_hash = tx1.calculate_hash(); // Now SignedTransaction has calculate_hash
+        let tx2_hash = tx2.calculate_hash(); // Now SignedTransaction has calculate_hash
+
+        // Manually calculate expected root
+        let leaves = vec![tx1_hash, tx2_hash];
+        let expected_merkle_tree = MerkleTree::new(leaves).unwrap();
+        let expected_root = expected_merkle_tree.root();
+
+        assert_eq!(triad.calculate_transactions_merkle_root(), expected_root, "Transaction Merkle root should match manual calculation.");
+    }
+
+    /// Tests `Triad::validate` method.
+    #[test]
+    fn test_triad_validation() {
+        let mut state_tree = StateTree::new();
+        // Set some dummy data in state_tree to get a non-zero root
+        state_tree.set(blake3_hash(b"key1").to_vec(), b"value1".to_vec()).unwrap();
+        let initial_state_root = state_tree.root_hash();
+
+        let tx1 = create_dummy_signed_transaction(b"sender1", b"receiver1", 50, 1, 1678886000, b"data1");
+        let tx2 = create_dummy_signed_transaction(b"sender2", b"receiver2", 75, 2, 1678886010, b"data2");
+        let transactions = vec![tx1.clone(), tx2.clone()];
+
+        let tx_merkle_root = Triad::new(
+            create_dummy_triad_header([0u8; HASH_SIZE], [0u8; HASH_SIZE], [0u8; HASH_SIZE]),
+            transactions.clone(),
+        ).calculate_transactions_merkle_root();
+
+        // Valid Triad
+        let valid_header = create_dummy_triad_header(
+            [0u8; HASH_SIZE],
+            tx_merkle_root,
+            initial_state_root, // Expected state root should match the *current* state root
+        );
+        let valid_triad = Triad::new(valid_header, transactions.clone());
+        assert!(valid_triad.validate(initial_state_root).is_ok(), "Valid triad should pass validation.");
+
+        // Triad with mismatched transactions Merkle root
+        let bad_tx_merkle_root = [99u8; HASH_SIZE]; // Deliberately wrong
+        let header_bad_tx_root = create_dummy_triad_header(
+            [0u8; HASH_SIZE],
+            bad_tx_merkle_root,
+            initial_state_root,
+        );
+        let triad_bad_tx_root = Triad::new(header_bad_tx_root, transactions.clone());
+        assert!(triad_bad_tx_root.validate(initial_state_root).is_err(), "Triad with bad transactions Merkle root should fail.");
+        if let Err(TriadError::TransactionsMerkleRootMismatch(_, _)) = triad_bad_tx_root.validate(initial_state_root) {
+            // Expected error type
+        } else {
+            panic!("Expected TransactionsMerkleRootMismatch error.");
+        }
+
+
+        // Triad with mismatched state Merkle root
+        let bad_state_root = [88u8; HASH_SIZE]; // Deliberately wrong
+        let header_bad_state_root = create_dummy_triad_header(
+            [0u8; HASH_SIZE],
+            tx_merkle_root,
+            bad_state_root, // Header's state root is wrong
+        );
+        let triad_bad_state_root = Triad::new(header_bad_state_root, transactions.clone());
+        // Validation fails because the header's state_merkle_root does not match the *passed in* expected_state_merkle_root
+        assert!(triad_bad_state_root.validate(initial_state_root).is_err(), "Triad with bad state Merkle root should fail.");
+        if let Err(TriadError::StateMerkleRootMismatch(_, _)) = triad_bad_state_root.validate(initial_state_root) {
+            // Expected error type
+        } else {
+            panic!("Expected StateMerkleRootMismatch error.");
+        }
+
+        // Triad with invalid transaction (e.g., zero amount)
+        let invalid_tx = create_dummy_signed_transaction(b"sender_bad", b"receiver_bad", 0, 3, 1678886020, b"bad_data");
+        let mut transactions_with_invalid = transactions.clone();
+        transactions_with_invalid.push(invalid_tx);
+
+        let tx_merkle_root_with_invalid = Triad::new(
+            create_dummy_triad_header([0u8; HASH_SIZE], [0u8; HASH_SIZE], [0u8; HASH_SIZE]),
+            transactions_with_invalid.clone(),
+        ).calculate_transactions_merkle_root();
+
+        let header_with_invalid_tx = create_dummy_triad_header(
+            [0u8; HASH_SIZE],
+            tx_merkle_root_with_invalid,
+            initial_state_root,
+        );
+        let triad_with_invalid_tx = Triad::new(header_with_invalid_tx, transactions_with_invalid);
+        assert!(triad_with_invalid_tx.validate(initial_state_root).is_err(), "Triad with invalid transaction should fail.");
+        if let Err(TriadError::TransactionValidationFailed(_)) = triad_with_invalid_tx.validate(initial_state_root) {
+            // Expected error type
+        } else {
+            panic!("Expected TransactionValidationFailed error.");
+        }
     }
 }

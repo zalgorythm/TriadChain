@@ -1,8 +1,0 @@
-network_id: "triad-testnet-v1"
-max_depth: 5
-consensus:
-  min_stake: 500  # TRI tokens
-  validator_count: 21
-protocol:
-  propagation_timeout_ms: 100
-  max_transactions_per_triad: 1000
